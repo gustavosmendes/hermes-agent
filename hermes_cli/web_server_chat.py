@@ -388,8 +388,8 @@ def _resolve_chat_argv(
     Tests monkeypatch this with a tiny fake command.  Env contract: resume goes
     through ``HERMES_TUI_RESUME`` (``ui-tui`` does not parse argv), resolved to
     the newest descendant; ``HERMES_TUI_GATEWAY_URL`` attaches to this process's
-    in-memory gateway but is SKIPPED for profile-scoped chats (that gateway runs
-    under the dashboard's own profile, so a scoped chat spawns its own);
+    in-memory gateway when the selected profile shares the dashboard's home.
+    Other profile homes spawn their own gateway;
     ``profile`` scopes the ENTIRE chat by pointing ``HERMES_HOME`` at the profile
     dir, the same propagation ``hermes -p <name>`` performs. ``workspace_cwd``
     (an already-validated host directory, ``chat_workspaces.resolve_chat_cwd``)
@@ -398,6 +398,7 @@ def _resolve_chat_argv(
     passes as the explicit ``cwd`` of ``session.create`` when attached to the
     in-memory gateway, whose own cwd is the dashboard's launch dir).
     """
+    from hermes_constants import get_process_hermes_home
     from hermes_cli.web_server_profiles import _config_profile_scope, _resolve_profile_dir
     from hermes_cli.web_server_sessions import _open_session_db_for_profile, _session_latest_descendant
     from hermes_cli.main import PROJECT_ROOT
@@ -462,9 +463,11 @@ def _resolve_chat_argv(
     if active_session_file:
         env["HERMES_TUI_ACTIVE_SESSION_FILE"] = active_session_file
 
-    # Without the attach URL, gatewayClient spawns its own `tui_gateway.entry`,
-    # which inherits the profile HERMES_HOME set above.
-    if profile_dir is None and (gateway_ws_url := _build_gateway_ws_url()):
+    # Only chats in another home need a separate gateway for profile isolation.
+    if (
+        profile_dir is None
+        or profile_dir.resolve() == get_process_hermes_home().resolve()
+    ) and (gateway_ws_url := _build_gateway_ws_url()):
         env["HERMES_TUI_GATEWAY_URL"] = gateway_ws_url
 
     return list(argv), str(cwd) if cwd else None, env
