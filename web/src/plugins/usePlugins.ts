@@ -39,16 +39,10 @@ export function cacheManifests(manifests: PluginManifest[]): void {
 }
 
 /**
- * Whether it is safe to skip the initial plugin-loading gate for a set of
- * cached manifests.
+ * Whether cached or freshly fetched manifests can release the chat gate.
  *
- * App.tsx waits on `pluginsLoading` before mounting the persistent ChatPage
- * host: if a plugin overrides /chat (`tab.override === "/chat"`), mounting
- * the built-in chat first would spawn a PTY and then yank it out from under
- * the user when the plugin resolves. That gate is load-bearing — so we may
- * only seed `loading = false` from the cache when no cached manifest
- * declares a /chat override. Manifests are still seeded either way; only
- * the loading flag stays conservative.
+ * Keep the gate for /chat overrides; unrelated plugin bundles need not finish
+ * registering before the built-in chat mounts.
  */
 export function canSeedLoadedFromCache(
   cached: PluginManifest[] | null,
@@ -88,7 +82,7 @@ export function usePlugins() {
       .then((list) => {
         cacheManifests(list);
         setManifests(list);
-        if (list.length === 0) setLoading(false);
+        if (canSeedLoadedFromCache(list)) setLoading(false);
       })
       .catch(() => setLoading(false));
   }, []);
