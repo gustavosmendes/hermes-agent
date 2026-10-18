@@ -1332,14 +1332,13 @@ describe('createGatewayEventHandler', () => {
     serverRequest('approval', { command: 'rm -rf /tmp/nope', description: 'dangerous command' })
     onEvent({ payload: {}, type: 'gateway.ready' } as any)
 
-    await Promise.resolve()
-    await Promise.resolve()
-
     expect(getOverlayState().approval).toMatchObject({ description: 'dangerous command' })
     // Plain stderr chatter never reaches Activity (it stays in /logs).
-    const activity = getTurnState().activity
-    expect(activity.map(a => a.tone)).toEqual(['info', 'info', 'info'])
-    expect(activity.some(a => a.text.includes('servers discovered'))).toBe(false)
+    await vi.waitFor(() => {
+      const activity = getTurnState().activity
+      expect(activity.map(a => a.tone)).toEqual(['info', 'info', 'info'])
+      expect(activity.some(a => a.text.includes('servers discovered'))).toBe(false)
+    })
   })
 
   it('defaults approval overlays to allowPermanent when the backend omits the field', () => {
