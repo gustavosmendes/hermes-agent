@@ -683,7 +683,7 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
 
   const keepTerminalElseRunning = (s: SubagentProgress['status']) => (isTerminalStatus(s) ? s : 'running')
 
-  const handleReady = async (skin?: GatewaySkin) => {
+  const handleReady = (skin?: GatewaySkin) => {
     if (skin) {
       applySkin(skin)
     }
@@ -704,13 +704,39 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
       void rpc('wake.start', { surface: 'tui' }).catch(() => undefined)
     }
 
+    // Bound to the live session when one exists (reconnect): project-local
+    // skills follow the session's repo. Before the first session the gateway
+    // uses the same workspace it seeds a new session with.
+    const catalogSid = getUiState().sid
+
+    rpc<CommandsCatalogResponse>('commands.catalog', catalogSid ? { session_id: catalogSid } : {})
+      .then(r => {
+        if (!r?.pairs) {
+          return
+        }
+
+        setCatalog({
+          canon: (r.canon ?? {}) as Record<string, string>,
+          categories: r.categories ?? [],
+          pairs: r.pairs as [string, string][],
+          skillCount: (r.skill_count ?? 0) as number,
+          sub: (r.sub ?? {}) as Record<string, string[]>
+        })
+
+        if (r.warning) {
+          turnController.pushActivity(String(r.warning), 'warn')
+        }
+      })
+      .catch((e: unknown) =>
+        turnController.pushActivity(t('gatewayMsg.startup.commandCatalogUnavailable', rpcErrorMessage(e)), 'info')
+      )
+
     // Keep the recovery target until resume succeeds, including across a second
     // disconnect during setup or history loading. Recovery never resends the prompt.
     const recoverSid = recoverSidRef?.current
-    let sessionStart: Promise<null | string | void>
 
     if (recoverSidRef && recoverSid) {
-      sessionStart = resumeById(recoverSid).then(() => {
+      void resumeById(recoverSid).then(() => {
         if (getUiState().sid && recoverSidRef.current === recoverSid) {
           recoverSidRef.current = null
         }
@@ -719,67 +745,55 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
       // so override it here to keep the distinct "recovering" label visible for
       // the duration of the resume RPC (which later flips status to 'ready').
       patchUiState({ status: t('gatewayMsg.status.recoveringSession') })
-    } else if (STARTUP_RESUME_ID) {
-      patchUiState({ status: t('session.status.resuming') })
-      sessionStart = resumeById(STARTUP_RESUME_ID)
-      scheduleStartupPrompt()
-    } else {
-      // Opt-in: when display.tui_auto_resume_recent is true, look up
-      // the most recent human-facing session and resume it instead of
-      // forging a brand-new one. Default off. Shares the full-config read.
-      sessionStart = getFullConfigOnce()
-        .then(cfg =>
-          cfg?.config?.display?.tui_auto_resume_recent
-            ? rpc<SessionMostRecentResponse>('session.most_recent', {}).then(r => r?.session_id ?? null)
-            : null
-        )
-        .catch(() => null)
-        .then<null | string | void>(target => {
-          if (target) {
-            patchUiState({ status: t('gatewayMsg.status.resumingMostRecent') })
-            const resumed = resumeById(target)
-            scheduleStartupPrompt()
 
-            return resumed
-          }
-
-          patchUiState({ status: t('gatewayMsg.status.forgingSession') })
-          const created = newSession()
-          scheduleStartupPrompt()
-
-          return created
-        })
+      return
     }
 
-    // Catalog discovery shares the RPC queue with session setup. Start it only
-    // after create/resume so skill scans cannot delay opening the session.
-    try {
-      await sessionStart
-    } finally {
-      const catalogSid = getUiState().sid
+    if (STARTUP_RESUME_ID) {
+      patchUiState({ status: t('session.status.resuming') })
+      resumeById(STARTUP_RESUME_ID)
+      scheduleStartupPrompt()
 
-      rpc<CommandsCatalogResponse>('commands.catalog', catalogSid ? { session_id: catalogSid } : {})
-        .then(r => {
-          if (!r?.pairs) {
+      return
+    }
+
+    // Opt-in: when `display.tui_auto_resume_recent` is true, look up
+    // the most recent human-facing session and resume it instead of
+    // forging a brand-new one.  Mirrors classic CLI's `hermes -c` /
+    // `hermes --tui` muscle memory and addresses the audit's "session
+    // unrecoverable after disconnection" gap.  Default off so existing
+    // users aren't surprised.  (Shares the memoized full-config read.)
+    getFullConfigOnce()
+      .then(cfg => {
+        if (!cfg?.config?.display?.tui_auto_resume_recent) {
+          patchUiState({ status: t('gatewayMsg.status.forgingSession') })
+          newSession()
+          scheduleStartupPrompt()
+
+          return
+        }
+
+        return rpc<SessionMostRecentResponse>('session.most_recent', {}).then(r => {
+          const target = r?.session_id
+
+          if (target) {
+            patchUiState({ status: t('gatewayMsg.status.resumingMostRecent') })
+            resumeById(target)
+            scheduleStartupPrompt()
+
             return
           }
 
-          setCatalog({
-            canon: (r.canon ?? {}) as Record<string, string>,
-            categories: r.categories ?? [],
-            pairs: r.pairs as [string, string][],
-            skillCount: (r.skill_count ?? 0) as number,
-            sub: (r.sub ?? {}) as Record<string, string[]>
-          })
-
-          if (r.warning) {
-            turnController.pushActivity(String(r.warning), 'warn')
-          }
+          patchUiState({ status: t('gatewayMsg.status.forgingSession') })
+          newSession()
+          scheduleStartupPrompt()
         })
-        .catch((e: unknown) =>
-          turnController.pushActivity(t('gatewayMsg.startup.commandCatalogUnavailable', rpcErrorMessage(e)), 'info')
-        )
-    }
+      })
+      .catch(() => {
+        patchUiState({ status: t('gatewayMsg.status.forgingSession') })
+        newSession()
+        scheduleStartupPrompt()
+      })
   }
 
   return (ev: AnyGatewayEvent) => {
@@ -812,7 +826,7 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         return
 
       case 'gateway.ready':
-        void handleReady(ev.payload?.skin)
+        handleReady(ev.payload?.skin)
 
         return
 
